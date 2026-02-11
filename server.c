@@ -1,25 +1,40 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define PORT 4000
 #define BUFFER_SIZE 1024
 
+void handle_client(int client_fd, struct sockaddr_in client_addr);
+
+// reap all finished children to prevent zombies
+void sigchld_handler(int sig) {
+  while (waitpid(-1, NULL, WNOHANG) > 0)
+    ;
+}
+
 int main() {
 
   int server_fd, client_fd;
-  char buffer[BUFFER_SIZE];
 
   // structures for describing the internet address
   // like port, ip family, ip address
   struct sockaddr_in server_addr, client_addr;
 
   socklen_t client_len = sizeof(client_addr);
+
+  struct sigaction sa;
+  sa.sa_handler = sigchld_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sigaction(SIGCHLD, &sa, NULL);
 
   // creates a socket and returns an FD
   // AF_INET - address family ipv4/ipv6
@@ -79,19 +94,51 @@ int main() {
     printf("Client connected from %s:%d\n", inet_ntoa(client_addr.sin_addr),
            ntohs(client_addr.sin_port));
 
-    // read data from the client
-    memset(buffer, 0, BUFFER_SIZE);
-    ssize_t bytes_read = recv(client_fd, buffer, BUFFER_SIZE - 1, 0);
-    if (bytes_read > 0) {
-      printf("Received: %s\n", buffer);
-
-      const char *response = "Message received\n";
-      send(client_fd, response, strlen(response), 0);
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("fork failed");
+      close(client_fd);
+    } else if (pid == 0) {
+      close(server_fd);
+      handle_client(client_fd, client_addr);
+    } else {
+      close(client_fd);
     }
-
-    close(client_fd);
   }
 
   close(server_fd);
   return 0;
+}
+
+void handle_client(int client_fd, struct sockaddr_in client_addr) {
+  char buffer[BUFFER_SIZE];
+  char client_ip[INET_ADDRSTRLEN];
+
+  inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+  printf("Child process handling client %s:%d\n", client_ip,
+         ntohs(client_addr.sin_port));
+
+  while (1) {
+    memset(buffer, 0, BUFFER_SIZE);
+    ssize_t bytes_read = recv(client_fd, buffer, BUFFER_SIZE - 1, 0);
+
+    if (bytes_read <= 0) {
+      if (bytes_read == 0) {
+        printf("[%s:%d] -> connection closed\n", client_ip,
+               ntohs(client_addr.sin_port));
+      } else {
+        perror("recv failed");
+      }
+      break;
+    }
+
+    buffer[bytes_read] = '\0';
+    printf("[%s:%d]\n-> %s\n", client_ip, ntohs(client_addr.sin_port), buffer);
+    const char *response = "Message received. Now f off\n";
+    send(client_fd, response, strlen(response), 0);
+  }
+
+  printf("Client %s:%d disconnected\n", client_ip, ntohs(client_addr.sin_port));
+  close(client_fd);
+  exit(EXIT_SUCCESS);
 }
