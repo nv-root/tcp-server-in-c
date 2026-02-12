@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
@@ -12,12 +13,20 @@
 #define PORT 4000
 #define BUFFER_SIZE 1024
 
+volatile sig_atomic_t running = 1;
+
 void handle_client(int client_fd, struct sockaddr_in client_addr);
 
 // reap all finished children to prevent zombies
 void sigchld_handler(int sig) {
+  (void)sig;
   while (waitpid(-1, NULL, WNOHANG) > 0)
     ;
+}
+
+void sigint_handler(int sig) {
+  (void)sig;
+  running = 0;
 }
 
 int main() {
@@ -30,11 +39,22 @@ int main() {
 
   socklen_t client_len = sizeof(client_addr);
 
-  struct sigaction sa;
-  sa.sa_handler = sigchld_handler;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_flags = SA_RESTART;
-  sigaction(SIGCHLD, &sa, NULL);
+  struct sigaction sa_chld, sa_int;
+
+  // ---------- SIGCHLD ----------
+  sa_chld.sa_handler = sigchld_handler;
+  sigemptyset(&sa_chld.sa_mask);
+  sa_chld.sa_flags = SA_RESTART;
+  sigaction(SIGCHLD, &sa_chld, NULL);
+
+  // ---------- SIGINT -----------
+  sa_int.sa_handler = sigint_handler;
+  sigemptyset(&sa_int.sa_mask);
+  sa_int.sa_flags = 0;
+  if (sigaction(SIGINT, &sa_int, NULL) < 0) {
+    perror("sigaction SIGINT");
+    exit(EXIT_FAILURE);
+  }
 
   // creates a socket and returns an FD
   // AF_INET - address family ipv4/ipv6
@@ -82,11 +102,13 @@ int main() {
 
   printf("Server listening on port %d...\n", PORT);
 
-  while (1) {
+  while (running) {
     // blocks until a client connection
     // fills the client address struct
     client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
     if (client_fd < 0) {
+      if (errno == EINTR)
+        continue;
       perror("accept failed");
       continue;
     }
@@ -106,6 +128,7 @@ int main() {
     }
   }
 
+  printf("Shutdown");
   close(server_fd);
   return 0;
 }
